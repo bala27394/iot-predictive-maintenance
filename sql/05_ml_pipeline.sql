@@ -1,0 +1,290 @@
+/*==========================================================================
+  05_ml_pipeline.sql — IoT Predictive Maintenance Platform
+  ML Training Views, Model Training, Inference, and Anomaly Population
+  Database: IOT_PREDICTIVE_MAINTENANCE
+==========================================================================*/
+
+USE DATABASE IOT_PREDICTIVE_MAINTENANCE;
+USE WAREHOUSE IOT_ML_WH;
+
+-- ========================================================================
+-- TRAINING VIEWS
+-- ========================================================================
+
+-- Full anomaly training view: pivoted sensor readings by type per machine/timestamp
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAINING_V AS
+SELECT
+    MACHINE_ID,
+    MACHINE_TYPE,
+    READING_TIMESTAMP,
+    MAX(CASE WHEN SENSOR_TYPE = 'VIBRATION'    THEN CLEAN_VALUE END) AS VIBRATION,
+    MAX(CASE WHEN SENSOR_TYPE = 'TEMPERATURE'  THEN CLEAN_VALUE END) AS TEMPERATURE,
+    MAX(CASE WHEN SENSOR_TYPE = 'PRESSURE'     THEN CLEAN_VALUE END) AS PRESSURE,
+    MAX(CASE WHEN SENSOR_TYPE = 'RPM'          THEN CLEAN_VALUE END) AS RPM,
+    MAX(CASE WHEN SENSOR_TYPE = 'POWER'        THEN CLEAN_VALUE END) AS POWER,
+    MAX(CASE WHEN SENSOR_TYPE = 'FLOW_RATE'    THEN CLEAN_VALUE END) AS FLOW_RATE,
+    MAX(CASE WHEN SENSOR_TYPE = 'NOISE_LEVEL'  THEN CLEAN_VALUE END) AS NOISE_LEVEL,
+    MAX(CASE WHEN SENSOR_TYPE = 'OIL_QUALITY'  THEN CLEAN_VALUE END) AS OIL_QUALITY,
+    BOOL_OR(IS_ANOMALY) AS IS_ANOMALY
+FROM STAGING.SENSOR_READINGS_CLEAN
+GROUP BY MACHINE_ID, MACHINE_TYPE, READING_TIMESTAMP;
+
+-- Training set: first 60 days (before 2026-07-31)
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_60D AS
+SELECT
+    MACHINE_ID,
+    MACHINE_TYPE,
+    READING_TIMESTAMP,
+    VIBRATION AS TARGET_VALUE,
+    IS_ANOMALY AS LABEL
+FROM ML_MODELS.ANOMALY_TRAINING_V
+WHERE READING_TIMESTAMP < '2026-07-31'
+  AND VIBRATION IS NOT NULL;
+
+-- Detection set: last 30 days, clean vibration records
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_DETECT_30D_CLEAN AS
+SELECT
+    MACHINE_ID,
+    MACHINE_TYPE,
+    READING_TIMESTAMP,
+    VIBRATION AS TARGET_VALUE
+FROM ML_MODELS.ANOMALY_TRAINING_V
+WHERE READING_TIMESTAMP >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+  AND VIBRATION IS NOT NULL;
+
+-- Forecast training: daily avg vibration per machine
+CREATE OR REPLACE VIEW ML_MODELS.FORECAST_TRAIN_SIMPLE_V AS
+SELECT
+    MACHINE_ID,
+    DATE(READING_TIMESTAMP) AS FORECAST_DATE,
+    AVG(VIBRATION)          AS AVG_VIBRATION
+FROM ML_MODELS.ANOMALY_TRAINING_V
+WHERE VIBRATION IS NOT NULL
+GROUP BY MACHINE_ID, DATE(READING_TIMESTAMP);
+
+-- ========================================================================
+-- PER-CLASS TRAINING VIEWS (one per machine type)
+-- ========================================================================
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_CNC_LATHE AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'CNC_LATHE';
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_HYDRAULIC_PRESS AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'HYDRAULIC_PRESS';
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_CONVEYOR AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'CONVEYOR';
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_COMPRESSOR AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'COMPRESSOR';
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_INJECTION_MOLDER AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'INJECTION_MOLDER';
+
+CREATE OR REPLACE VIEW ML_MODELS.ANOMALY_TRAIN_PUMP AS
+SELECT MACHINE_ID, READING_TIMESTAMP, TARGET_VALUE, LABEL
+FROM ML_MODELS.ANOMALY_TRAIN_60D
+WHERE MACHINE_TYPE = 'PUMP';
+
+-- ========================================================================
+-- MODEL TRAINING: Per-Class Anomaly Detection (6 models)
+-- ========================================================================
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_CNC_LATHE(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_CNC_LATHE'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_HYDRAULIC_PRESS(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_HYDRAULIC_PRESS'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_CONVEYOR(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_CONVEYOR'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_COMPRESSOR(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_COMPRESSOR'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_INJECTION_MOLDER(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_INJECTION_MOLDER'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_PUMP(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_PUMP'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+-- ========================================================================
+-- MODEL TRAINING: Combined Anomaly Detection (all machine types)
+-- ========================================================================
+
+CREATE OR REPLACE SNOWFLAKE.ML.ANOMALY_DETECTION ML_MODELS.ANOMALY_MODEL_ALL(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_TRAIN_60D'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+    TARGET_COLNAME => 'TARGET_VALUE',
+    LABEL_COLNAME => 'LABEL'
+);
+
+-- ========================================================================
+-- MODEL TRAINING: Vibration Forecast
+-- ========================================================================
+
+CREATE OR REPLACE SNOWFLAKE.ML.FORECAST ML_MODELS.VIBRATION_FORECAST(
+    INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.FORECAST_TRAIN_SIMPLE_V'),
+    SERIES_COLNAME => 'MACHINE_ID',
+    TIMESTAMP_COLNAME => 'FORECAST_DATE',
+    TARGET_COLNAME => 'AVG_VIBRATION'
+);
+
+-- ========================================================================
+-- INFERENCE: Anomaly Detection Results
+-- ========================================================================
+
+CREATE OR REPLACE TABLE ML_MODELS.ANOMALY_RESULTS AS
+SELECT *
+FROM TABLE(
+    ML_MODELS.ANOMALY_MODEL_ALL!DETECT_ANOMALIES(
+        INPUT_DATA => SYSTEM$REFERENCE('VIEW', 'ML_MODELS.ANOMALY_DETECT_30D_CLEAN'),
+        SERIES_COLNAME => 'MACHINE_ID',
+        TIMESTAMP_COLNAME => 'READING_TIMESTAMP',
+        TARGET_COLNAME => 'TARGET_VALUE',
+        CONFIG_OBJECT => {'prediction_interval': 0.99}
+    )
+);
+
+-- ========================================================================
+-- INFERENCE: Failure Forecasts (14 days ahead)
+-- ========================================================================
+
+CREATE OR REPLACE TABLE ANALYTICS.FAILURE_FORECASTS AS
+SELECT *
+FROM TABLE(
+    ML_MODELS.VIBRATION_FORECAST!FORECAST(
+        FORECASTING_PERIODS => 14,
+        CONFIG_OBJECT => {'prediction_interval': 0.95}
+    )
+);
+
+-- ========================================================================
+-- POPULATE DETECTED_ANOMALIES TABLE
+-- ========================================================================
+
+INSERT INTO ANALYTICS.DETECTED_ANOMALIES (
+    ANOMALY_ID,
+    MACHINE_ID,
+    READING_TIMESTAMP,
+    SENSOR_TYPE,
+    ANOMALY_SCORE,
+    SEVERITY,
+    STATUS,
+    HEALTH_SCORE,
+    CONTEXT_SUMMARY,
+    DETECTED_AT
+)
+SELECT
+    UUID_STRING()                   AS ANOMALY_ID,
+    ar.MACHINE_ID,
+    ar.TS                           AS READING_TIMESTAMP,
+    'VIBRATION'                     AS SENSOR_TYPE,
+    ar.ANOMALY_SCORE,
+    NULL                            AS SEVERITY,       -- will be updated below
+    'NEW'                           AS STATUS,
+    cmh.HEALTH_SCORE,
+    OBJECT_CONSTRUCT(
+        'z_score',          ac.Z_SCORE_24H,
+        'threshold_status', ac.THRESHOLD_STATUS,
+        'health_status',    cmh.HEALTH_STATUS,
+        'operator',         ac.OPERATOR_NAME,
+        'last_failure',     ac.LAST_FAILURE_TYPE,
+        'performance',      ac.PERFORMANCE_STATUS
+    )::VARCHAR                      AS CONTEXT_SUMMARY,
+    CURRENT_TIMESTAMP()             AS DETECTED_AT
+FROM ML_MODELS.ANOMALY_RESULTS ar
+LEFT JOIN STAGING.CROSS_MACHINE_HEALTH cmh
+    ON ar.MACHINE_ID = cmh.MACHINE_ID
+LEFT JOIN ANALYTICS.ANOMALY_CONTEXT ac
+    ON ar.MACHINE_ID = ac.MACHINE_ID
+    AND ar.TS = ac.READING_TIMESTAMP
+WHERE ar.IS_ANOMALY = TRUE;
+
+-- ========================================================================
+-- SEVERITY CLASSIFICATION UPDATE
+-- ========================================================================
+
+UPDATE ANALYTICS.DETECTED_ANOMALIES
+SET SEVERITY = CASE
+    WHEN HEALTH_SCORE < 40 AND ANOMALY_SCORE > 0.99 THEN 'CRITICAL'
+    WHEN HEALTH_SCORE < 40 OR ANOMALY_SCORE > 0.995 THEN 'HIGH'
+    WHEN HEALTH_SCORE < 60 OR ANOMALY_SCORE > 0.99  THEN 'MEDIUM'
+    ELSE 'LOW'
+END
+WHERE SEVERITY IS NULL;
+
+-- ========================================================================
+-- AI SEVERITY REASONING (CRITICAL/HIGH anomalies, latest per machine)
+-- ========================================================================
+
+UPDATE ANALYTICS.DETECTED_ANOMALIES da
+SET AI_REASONING = SNOWFLAKE.CORTEX.COMPLETE(
+    'llama3.1-70b',
+    CONCAT(
+        'You are an industrial maintenance AI analyst. Analyze this anomaly and provide a concise severity reasoning in 2-3 sentences.\n\n',
+        'Machine: ', da.MACHINE_ID, '\n',
+        'Severity: ', da.SEVERITY, '\n',
+        'Anomaly Score: ', da.ANOMALY_SCORE::VARCHAR, '\n',
+        'Health Score: ', COALESCE(da.HEALTH_SCORE::VARCHAR, 'N/A'), '\n',
+        'Context: ', COALESCE(da.CONTEXT_SUMMARY, 'N/A'), '\n',
+        'Timestamp: ', da.READING_TIMESTAMP::VARCHAR, '\n\n',
+        'Provide reasoning for the severity classification and recommend immediate actions.'
+    )
+)
+WHERE da.SEVERITY IN ('CRITICAL', 'HIGH')
+  AND da.ANOMALY_ID IN (
+      SELECT ANOMALY_ID
+      FROM (
+          SELECT
+              ANOMALY_ID,
+              ROW_NUMBER() OVER (
+                  PARTITION BY MACHINE_ID
+                  ORDER BY DETECTED_AT DESC
+              ) AS rn
+          FROM ANALYTICS.DETECTED_ANOMALIES
+          WHERE SEVERITY IN ('CRITICAL', 'HIGH')
+      )
+      WHERE rn = 1
+  );

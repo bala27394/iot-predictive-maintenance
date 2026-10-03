@@ -1,6 +1,6 @@
 # Predictive Maintenance Command Center — Dashboard Views Guide
 
-Each view in the Streamlit Command Center maps directly to a stage in the predictive maintenance closed-loop story. Every view was built, tested, and iterated using CoCo CLI — from the SQL queries powering each panel to the Streamlit layout code itself.
+Each view in the Streamlit Command Center maps directly to a stage in the predictive maintenance closed-loop story. Every view was built, tested, and iterated using CoCo CLI — from the SQL queries powering each panel to the Streamlit layout code itself. AI agents (Cortex LLM and Cortex Search) are integrated at runtime across investigation, narrative generation, and work-order drafting.
 
 ---
 
@@ -29,7 +29,7 @@ This view converges all three data domains into one real-time display. Each mach
 ## View 2: Incident Triage
 
 **What it does:**
-Replaces a raw feed of anomaly alerts with grouped, prioritized incidents. Each incident is an expandable card showing health score, RUL (Remaining Useful Life), confidence level, evidence narrative, and priority drivers. Supervisors can Acknowledge, Draft a Work Order, or mark as False Positive directly from the UI.
+Replaces a raw feed of anomaly alerts with grouped, prioritized incidents. Each incident is an expandable card showing health score, RUL (Remaining Useful Life), confidence level, AI-generated evidence narrative, and priority drivers. Supervisors can Acknowledge, **AI Draft a Work Order** (using Cortex LLM), or mark as False Positive directly from the UI.
 
 **Problem it solves:**
 Anomaly detection systems generate thousands of alerts. Without correlation, operators suffer alert fatigue — the same bearing degradation triggers separate vibration, temperature, and current alerts every hour. This view groups related anomalies from the same machine into a single incident and ranks them by a transparent priority score.
@@ -41,7 +41,11 @@ Anomaly detection systems generate thousands of alerts. Without correlation, ope
 - Repair urgency / RUL proxy (0–20 points)
 - Evidence confidence (0–10 points)
 
-The supervisor can see exactly why INC-001 (MCH-001, bearing degradation) scores 77/100 — it's HIGH criticality, DEGRADED production, past the predicted threshold, with HIGH confidence.
+**AI Agent role:**
+When the supervisor clicks "AI Draft Work Order", the system calls `ORCHESTRATION.AI_DRAFT_WORK_ORDER` which uses `SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b')` to:
+1. Generate a technical problem description from the sensor evidence JSON
+2. Generate a step-by-step repair checklist tailored to the machine type and failure mode
+The AI output replaces the previous hardcoded template strings with context-aware, specific repair guidance.
 
 **Key data sources:**
 - `ANALYTICS.INCIDENTS` — correlated incidents with priority scores
@@ -49,75 +53,114 @@ The supervisor can see exactly why INC-001 (MCH-001, bearing degradation) scores
 
 **Built with CoCo CLI:**
 - Incident correlation logic designed and SQL authored through CoCo
-- Priority formula iterated and validated with CoCo queries
-- Streamlit button actions (acknowledge, draft WO, false positive) tested through CoCo
+- AI work-order drafting procedure created and tested through CoCo
+- Streamlit button actions (acknowledge, AI draft WO, false positive) tested through CoCo
 
 ---
 
 ## View 3: Machine Detail & Predictive Diagnosis
 
 **What it does:**
-Deep-dive into a single machine. Shows synchronized sensor trends (vibration, temperature, current, RPM) over 30 days as line charts with 24-hour rolling averages overlaid. Below the charts: failure forecast table with predicted failure mode, risk horizon, days-to-threshold, and confidence. An evidence panel explains "Why This Alert?" in plain language.
+Deep-dive into a single machine. Shows synchronized sensor trends (vibration, temperature, current, RPM) over 30 days as line charts with 24-hour rolling averages overlaid. Below the charts: failure forecast table with predicted failure mode, risk horizon, days-to-threshold, and confidence. An evidence panel explains "Why This Alert?" using an **AI-generated narrative** — not a template.
 
 **Problem it solves:**
-When an operator reports "machine sounds different," the engineer needs to quickly see: Is vibration actually trending up? Is temperature following? Is this correlated with current draw? What does the prediction say? This view puts all sensor signals on a common timeline with the prediction context, so the engineer can validate or override the system's assessment.
+When an operator reports "machine sounds different," the engineer needs to quickly see: Is vibration actually trending up? Is temperature following? Is this correlated with current draw? What does the prediction say?
+
+**AI Agent role:**
+The "Why This Alert?" evidence panel displays an AI-generated narrative created by `ORCHESTRATION.AI_GENERATE_FAILURE_NARRATIVE`, which calls `SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b')` with the machine's full evidence JSON (sensor trends, maintenance history, operator observations, production status). The LLM produces a specific, data-grounded explanation — for example:
+
+> "A bearing degradation failure mode is likely developing, as evidenced by the increasing temperature trend (1.56°C/day) and vibration trend (0.31 mm/s/day). The operator's observation of a slight burning smell from the spindle housing area supports this conclusion. The situation is urgent, with a 9.88% reject rate and temperature already at 90.94°C."
 
 **Key data sources:**
 - `STAGING.MACHINE_HEALTH_FEATURES` — hourly aggregates with rolling windows
 - `ANALYTICS.FAILURE_FORECASTS` — trend-based predictions with RUL estimates
-- `ANALYTICS.FAILURE_ASSESSMENTS` — evidence narrative and recommendation
+- `ANALYTICS.FAILURE_ASSESSMENTS` — AI-generated evidence narrative
 
 **Built with CoCo CLI:**
 - Rolling window features (6h, 24h, 7d) designed through CoCo
-- Trend slope calculation (manual regression since REGR_SLOPE doesn't support sliding windows) debugged via CoCo
-- Chart rendering validated — pd.to_datetime and pd.to_numeric coercions added after CoCo-identified type errors
+- AI narrative generation procedure authored and tested via CoCo
+- `SNOWFLAKE.CORTEX.COMPLETE` integration validated with real evidence data through CoCo
 
 ---
 
-## View 4: Root-Cause Copilot
+## View 4: Root-Cause Copilot (AI-Powered)
 
 **What it does:**
-An investigation workspace with four tabs:
-1. **Evidence Summary** — structured narrative of what sensors show, what history suggests, and what operators observed
-2. **Sensor Analysis** — last 7 days of each signal with baseline deviation values
-3. **Historical Cases** — prior maintenance records matching the same failure mode or machine
-4. **Maintenance History** — complete repair log for the selected machine
+An AI-powered investigation workspace with five tabs:
+1. **AI Copilot** — interactive chat where users ask free-form questions about any machine and get AI responses grounded in sensor evidence and maintenance history
+2. **Evidence Summary** — AI-generated narrative of what sensors show, what history suggests, and what operators observed
+3. **Sensor Analysis** — last 7 days of each signal with baseline deviation values
+4. **Historical Cases** — prior maintenance records matching the same failure mode or machine (powered by Cortex Search Service)
+5. **Maintenance History** — complete repair log for the selected machine
 
 **Problem it solves:**
-Root-cause analysis traditionally requires an experienced engineer to pull data from multiple systems, compare current signals to historical patterns, and recall similar past failures. This view automates that retrieval — when investigating MCH-001's bearing degradation, it surfaces MNT-001 (August 2024, same failure mode, same root cause: spindle bearing wear from high-load operation) and MNT-002 (March 2023, preventive catch).
+Root-cause analysis traditionally requires an experienced engineer to pull data from multiple systems, compare current signals to historical patterns, and recall similar past failures. This view replaces that manual process with an AI copilot that can answer natural-language questions using the machine's actual data as context.
+
+**AI Agent role — this is the primary AI interaction point:**
+
+The **AI Copilot tab** lets users ask questions like:
+- "Why is this machine flagged as critical?"
+- "What changed first before the alert?"
+- "Has this failure happened before? What was the root cause?"
+- "What production impact should we expect if we delay?"
+- "Is the required part available?"
+
+When the user clicks "Ask AI", the system:
+1. Retrieves the machine's `EVIDENCE_JSON` from `FAILURE_ASSESSMENTS`
+2. Retrieves the machine's last 3 maintenance records from `MAINTENANCE_HISTORY`
+3. Constructs a structured prompt with all context
+4. Calls `SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b')` to generate a grounded answer
+5. Displays the AI response with specific sensor values and historical data cited
+
+The **Historical Cases tab** is backed by `APP.MAINTENANCE_SEARCH`, a **Cortex Search Service** that provides semantic search over all maintenance records. This enables finding similar failure patterns even when the failure mode name doesn't exactly match.
 
 **Key data sources:**
-- `ANALYTICS.FAILURE_ASSESSMENTS` — evidence JSON and narrative
-- `STAGING.MACHINE_HEALTH_FEATURES` — recent sensor data with deviation metrics
-- `RAW.MAINTENANCE_HISTORY` — historical failures, root causes, actions, costs
+- `ANALYTICS.FAILURE_ASSESSMENTS` — evidence JSON fed to LLM as context
+- `RAW.MAINTENANCE_HISTORY` — historical records fed to LLM as context
+- `APP.MAINTENANCE_SEARCH` — Cortex Search Service for semantic similar-case retrieval
+- `STAGING.MACHINE_HEALTH_FEATURES` — sensor data for analysis tab
+- `SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b')` — LLM for interactive Q&A
 
 **Built with CoCo CLI:**
-- Historical similar-case retrieval query designed through CoCo
-- Evidence narrative generation built and tested via CoCo SQL
-- Tab layout and data flow validated through iterative CoCo Streamlit debugging
+- AI Copilot prompt engineering designed and iterated through CoCo
+- Cortex Search Service created over maintenance knowledge base through CoCo
+- Evidence-grounded prompting tested with multiple question types via CoCo
 
 ---
 
 ## View 5: Work Order Management
 
 **What it does:**
-Full work-order lifecycle management across tabs (All, DRAFT, APPROVED, RESOLVED). Each work order shows AI-generated problem description, recommended repair actions, estimated repair hours, downtime, and maintenance window. DRAFT orders have Approve/Reject buttons with approver name input. APPROVED orders have a Resolve form capturing actual root cause, parts replaced, repair hours, and technician findings.
+Full work-order lifecycle management across tabs (All, DRAFT, APPROVED, RESOLVED). Each work order shows **AI-generated** problem description and repair checklist, estimated repair hours, downtime, and maintenance window. DRAFT orders have Approve/Reject buttons. APPROVED orders have a Resolve form capturing actual root cause, parts replaced, repair hours, and technician findings.
 
 **Problem it solves:**
 The gap between "the system predicted a failure" and "maintenance actually happens" is where most predictive maintenance projects fail. This view closes that gap with:
-- **Governed automation**: work orders are drafted automatically but require human approval
+- **AI-powered drafting**: Cortex LLM generates technical problem descriptions and repair checklists tailored to the specific machine and failure mode
+- **Governed automation**: work orders require human approval before dispatch
 - **Duplicate prevention**: the system blocks a second WO for the same machine + failure mode
 - **Post-repair feedback**: capturing actual outcomes validates future predictions
+- **Email notifications**: approved work orders trigger email alerts to the maintenance team
+
+**AI Agent role:**
+Work orders are created by `ORCHESTRATION.AI_DRAFT_WORK_ORDER`, which makes two separate `CORTEX.COMPLETE` calls:
+1. First call generates a 2-3 sentence technical problem description from the evidence
+2. Second call generates a 5-7 step repair checklist specific to the machine type and failure mode
+
+This produces work orders like:
+> **Problem:** "MCH-001's spindle bearing is exhibiting accelerated wear patterns with vibration increasing at 0.31 mm/s per day and temperature at 1.56°C per day. Current readings of 12.8 mm/s vibration and 90.9°C exceed warning thresholds, consistent with the two prior bearing failures on this machine."
+>
+> **Actions:** "1. Lockout/tagout machine and isolate power. 2. Remove spindle housing cover and inspect bearing races for scoring. 3. Measure bearing clearance with dial indicator. 4. Replace bearings if clearance exceeds 0.05mm spec. 5. Flush and refill lubrication system. 6. Verify spindle alignment with laser tool. 7. Run test cycle at 50% then 100% load, verify vibration < 4 mm/s."
 
 **Key data sources:**
 - `RAW.WORK_ORDERS` — full lifecycle table
 - `ANALYTICS.INCIDENTS` — linked evidence and health scores
-- `ORCHESTRATION.DRAFT_WORK_ORDER` / `APPROVE_WORK_ORDER` / `RESOLVE_WORK_ORDER` — stored procedures
+- `ORCHESTRATION.AI_DRAFT_WORK_ORDER` — AI-powered stored procedure
+- `ORCHESTRATION.APPROVE_WORK_ORDER` / `RESOLVE_WORK_ORDER` — approval and feedback SPs
 
 **Built with CoCo CLI:**
-- All three stored procedures authored and debugged through CoCo
-- Duplicate prevention logic tested via CoCo procedure calls
-- Widget key deduplication (DuplicateWidgetID error) fixed through CoCo after SiS testing
+- AI drafting procedure authored and tested through CoCo
+- Duplicate prevention and approval logic debugged via CoCo
+- Email notification integration created through CoCo
 
 ---
 
@@ -140,7 +183,6 @@ Maintenance teams often can't answer: "If we delay this repair, what's the produ
 **Built with CoCo CLI:**
 - OEE formula (A × P × Q) implemented and validated through CoCo SQL
 - Production impact view joining incidents to OEE data designed via CoCo
-- Decimal/NaN type handling in Streamlit charts fixed through CoCo debugging
 
 ---
 
@@ -154,7 +196,7 @@ Reliability analysis dashboard showing:
 - Repeat failure pattern detection (machines with >1 occurrence of the same failure mode)
 
 **Problem it solves:**
-Without historical analysis, plants repeat the same mistakes. This view surfaces patterns — MCH-001 has had BEARING_DEGRADATION twice before, costing $7,700 total with 14 hours of downtime. That pattern, combined with the current prediction, builds a compelling case for proactive bearing replacement on a schedule rather than waiting for failure.
+Without historical analysis, plants repeat the same mistakes. This view surfaces patterns — MCH-001 has had BEARING_DEGRADATION twice before, costing $7,700 total with 14 hours of downtime. That pattern, combined with the current AI-generated prediction, builds a compelling case for proactive bearing replacement.
 
 **Key data sources:**
 - `RAW.MAINTENANCE_HISTORY` — 10 historical records with root causes, costs, parts
@@ -163,7 +205,6 @@ Without historical analysis, plants repeat the same mistakes. This view surfaces
 **Built with CoCo CLI:**
 - Maintenance history data generated with realistic failure patterns through CoCo
 - Repeat failure detection query authored via CoCo
-- Cost aggregation validated through CoCo SQL
 
 ---
 
@@ -182,6 +223,7 @@ Trust is the #1 barrier to predictive maintenance adoption. If operators don't t
 - MCH-003's vibration sensor has 488 STALE readings — the system flags this and reduces prediction confidence
 - When evidence is insufficient, the system routes to MANUAL_INSPECTION_RECOMMENDED instead of making an overconfident claim
 - Model versions are tracked so predictions are auditable
+- AI-generated narratives are shown alongside the evidence JSON they were derived from, so users can verify the AI's reasoning
 
 **Key data sources:**
 - `STAGING.SENSOR_READINGS_CLEAN` — freshness and quality metrics
@@ -191,8 +233,20 @@ Trust is the #1 barrier to predictive maintenance adoption. If operators don't t
 
 **Built with CoCo CLI:**
 - INFORMATION_SCHEMA query replaced SHOW DYNAMIC TABLES after CoCo identified a Snowpark column-count parsing bug
-- Reserved keyword "ROWS" quoted after CoCo caught the SQL compilation error
 - Sensor quality flags (STALE, SUSPECT, MISSING) designed and validated through CoCo
+
+---
+
+## Where AI Agents Operate — Summary
+
+| View | AI Feature | Snowflake Component |
+|------|-----------|-------------------|
+| **Incident Triage** | "AI Draft Work Order" button generates LLM-written problem description + repair checklist | `CORTEX.COMPLETE('llama3.1-70b')` via `AI_DRAFT_WORK_ORDER` SP |
+| **Machine Detail** | "Why This Alert?" panel shows AI-generated failure narrative from sensor evidence | `CORTEX.COMPLETE('llama3.1-70b')` via `AI_GENERATE_FAILURE_NARRATIVE` SP |
+| **Root-Cause Copilot** | Interactive AI chat — ask any question, get evidence-grounded answers | `CORTEX.COMPLETE('llama3.1-70b')` called from Streamlit with structured prompt |
+| **Root-Cause Copilot** | Semantic search over maintenance knowledge base for similar-case retrieval | `CORTEX SEARCH SERVICE` on `APP.MAINTENANCE_KNOWLEDGE` |
+| **Work Orders** | AI-generated problem descriptions and repair checklists displayed in each WO | Created by `AI_DRAFT_WORK_ORDER` at draft time |
+| **Scheduled Task** | Every 8 hours: scans incidents, sends email alerts for critical/high items | `SYSTEM$SEND_EMAIL` via `RUN_MAINTENANCE_CYCLE` SP |
 
 ---
 
@@ -201,19 +255,19 @@ Trust is the #1 barrier to predictive maintenance adoption. If operators don't t
 ```
 VIEW 1: Factory Overview     →  "MCH-001 is CRITICAL, health 77/100"
     ↓
-VIEW 2: Incident Triage      →  "INC-001, priority 77, bearing degradation predicted"
+VIEW 2: Incident Triage      →  "INC-001, priority 77 — click AI Draft Work Order"
+    ↓                              [AI generates problem description + repair steps]
+VIEW 3: Machine Detail       →  "Vibration 4→13 mm/s over 30 days"
+    ↓                              [AI explains: bearing degradation, 1.56°C/day rise, 9.88% rejects]
+VIEW 4: Root-Cause Copilot   →  "Ask AI: Why is this critical? What failed before?"
+    ↓                              [AI answers using sensor evidence + maintenance history]
+VIEW 5: Work Orders          →  "WO-0001: AI-written repair checklist, supervisor approved"
+    ↓                              [Email notification dispatched]
+VIEW 6: OEE & Production     →  "10% reject rate, 8h downtime at risk"
     ↓
-VIEW 3: Machine Detail       →  "Vibration 4→13 mm/s over 30 days, temp+current following"
+VIEW 7: Maintenance History  →  "Third bearing failure — AI pattern matches Aug 2024"
     ↓
-VIEW 4: Root-Cause Copilot   →  "Same failure in Aug 2024, same root cause, same machine"
-    ↓
-VIEW 5: Work Orders          →  "WO-0001 drafted with repair actions, approved by supervisor"
-    ↓
-VIEW 6: OEE & Production     →  "10% reject rate, 8h downtime at risk if we don't act"
-    ↓
-VIEW 7: Maintenance History  →  "Third bearing failure — time to change the PM schedule"
-    ↓
-VIEW 8: Data Trust           →  "All pipelines active, HIGH confidence, models versioned"
+VIEW 8: Data Trust           →  "All pipelines active, HIGH confidence, AI narratives auditable"
 ```
 
-Every view was authored, debugged, and validated using CoCo CLI — from initial SQL design through Streamlit rendering fixes (hide_index, st.rerun, Plotly removal, Decimal type handling, DuplicateWidgetID resolution).
+Every view was authored, debugged, and validated using CoCo CLI. AI agents (Cortex LLM and Cortex Search) are embedded at runtime in Views 2, 3, 4, and 5 — transforming the application from a rule-based dashboard into an AI-powered maintenance copilot.

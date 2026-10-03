@@ -257,8 +257,9 @@ elif page == "Incident Triage":
                 if col_a.button("Acknowledge", key=f"triage_ack_{row_idx}"):
                     session.sql(f"UPDATE IOT_PREDICTIVE_MAINTENANCE.ANALYTICS.INCIDENTS SET STATUS='ACKNOWLEDGED', UPDATED_AT=CURRENT_TIMESTAMP() WHERE INCIDENT_ID='{inc['INCIDENT_ID']}'").collect()
                     do_rerun()
-                if col_b.button("Draft Work Order", key=f"triage_wo_{row_idx}"):
-                    result = session.sql(f"CALL IOT_PREDICTIVE_MAINTENANCE.ORCHESTRATION.DRAFT_WORK_ORDER('{inc['INCIDENT_ID']}')").collect()
+                if col_b.button("AI Draft Work Order", key=f"triage_wo_{row_idx}"):
+                    with st.spinner("AI generating work order..."):
+                        result = session.sql(f"CALL IOT_PREDICTIVE_MAINTENANCE.ORCHESTRATION.AI_DRAFT_WORK_ORDER('{inc['INCIDENT_ID']}')").collect()
                     st.success(result[0][0])
                     do_rerun()
                 if col_c.button("False Positive", key=f"triage_fp_{row_idx}"):
@@ -346,16 +347,42 @@ elif page == "Root-Cause Copilot":
         machine_id = inc["MACHINE_ID"]
         failure_mode = inc["SUSPECTED_FAILURE_MODE"]
 
-        tabs = st.tabs(["Evidence Summary", "Sensor Analysis", "Historical Cases", "Maintenance History"])
+        tabs = st.tabs(["AI Copilot", "Evidence Summary", "Sensor Analysis", "Historical Cases", "Maintenance History"])
 
         with tabs[0]:
+            st.markdown("**Ask the AI about this machine's condition, risks, or maintenance history.**")
+            user_question = st.text_input("Ask a question:", key="copilot_question",
+                placeholder="e.g., Why is this machine critical? What should we do first?")
+            if st.button("Ask AI", key="copilot_ask"):
+                if user_question:
+                    evidence_row = run_query(f"SELECT EVIDENCE_JSON FROM IOT_PREDICTIVE_MAINTENANCE.ANALYTICS.FAILURE_ASSESSMENTS WHERE MACHINE_ID='{machine_id}'")
+                    maint_hist = run_query(f"SELECT FAILURE_MODE, ROOT_CAUSE, ACTION_TAKEN, COMPLETED_AT FROM IOT_PREDICTIVE_MAINTENANCE.RAW.MAINTENANCE_HISTORY WHERE MACHINE_ID='{machine_id}' ORDER BY COMPLETED_AT DESC LIMIT 3")
+                    context = safe_str(evidence_row.iloc[0]["EVIDENCE_JSON"] if not evidence_row.empty else "{}", "{}")
+                    hist_context = maint_hist.to_string(index=False) if not maint_hist.empty else "No prior maintenance records."
+                    prompt = f"You are a predictive maintenance AI copilot. Machine: {machine_id} ({inc['MACHINE_NAME']}). Predicted failure: {failure_mode}. Sensor evidence JSON: {context}. Maintenance history: {hist_context}. User question: {user_question}. Answer concisely with specific data from the evidence. If you reference sensor values, cite the numbers."
+                    with st.spinner("AI analyzing..."):
+                        ai_answer = session.sql(f"SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.1-70b', $${prompt}$$) AS ANSWER").collect()
+                    st.markdown("**AI Response:**")
+                    st.write(ai_answer[0][0])
+                else:
+                    st.warning("Enter a question first.")
+
+            st.markdown("---")
+            st.markdown("**Suggested questions:**")
+            st.markdown("- Why is this machine flagged as critical?")
+            st.markdown("- What changed first before the alert?")
+            st.markdown("- Has this failure happened before? What was the root cause?")
+            st.markdown("- What production impact should we expect if we delay?")
+            st.markdown("- Is the required part available?")
+
+        with tabs[1]:
             evidence = run_query(f"SELECT EVIDENCE_NARRATIVE, EVIDENCE_JSON FROM IOT_PREDICTIVE_MAINTENANCE.ANALYTICS.FAILURE_ASSESSMENTS WHERE MACHINE_ID='{machine_id}'")
             if not evidence.empty:
                 st.write(safe_str(evidence.iloc[0]["EVIDENCE_NARRATIVE"], "No evidence available."))
             else:
                 st.info("No assessment found for this machine.")
 
-        with tabs[1]:
+        with tabs[2]:
             sensor_data = run_query(f"""
                 SELECT SIGNAL_TYPE, HOUR_BUCKET, AVG_VALUE, BASELINE_DEVIATION_7D, RATE_OF_CHANGE_6H
                 FROM IOT_PREDICTIVE_MAINTENANCE.STAGING.MACHINE_HEALTH_FEATURES
@@ -373,7 +400,7 @@ elif page == "Root-Cause Copilot":
             else:
                 st.info("No recent sensor data available.")
 
-        with tabs[2]:
+        with tabs[3]:
             similar = run_query(f"""
                 SELECT MAINTENANCE_ID, MACHINE_ID, FAILURE_MODE, ROOT_CAUSE, ACTION_TAKEN, PARTS_REPLACED, COMPLETED_AT
                 FROM IOT_PREDICTIVE_MAINTENANCE.RAW.MAINTENANCE_HISTORY
@@ -386,7 +413,7 @@ elif page == "Root-Cause Copilot":
             else:
                 st.info("No similar historical cases found.")
 
-        with tabs[3]:
+        with tabs[4]:
             maint = run_query(f"""
                 SELECT MAINTENANCE_ID, FAILURE_MODE, ROOT_CAUSE, ACTION_TAKEN, PARTS_REPLACED,
                        REPAIR_DURATION_HRS, COST, MAINTENANCE_TYPE, COMPLETED_AT

@@ -1,59 +1,107 @@
--- =============================================================================
--- IoT Predictive Maintenance Platform
--- 07: Semantic View for Cortex Analyst
--- =============================================================================
+-- ============================================================
+-- 07_semantic_view.sql
+-- OEE Metrics, Production Impact, Command Center Views
+-- Database: IOT_PREDICTIVE_MAINTENANCE | Warehouse: IOT_PM_WH
+-- ============================================================
 
 USE DATABASE IOT_PREDICTIVE_MAINTENANCE;
-USE SCHEMA APP;
+USE WAREHOUSE IOT_PM_WH;
 
-CREATE OR REPLACE SEMANTIC VIEW IOT_MAINTENANCE_VIEW
-  TABLES (
-    machine_health AS IOT_PREDICTIVE_MAINTENANCE.STAGING.CROSS_MACHINE_HEALTH
-      PRIMARY KEY (MACHINE_ID)
-      COMMENT = 'Current health scores for all 50 machines',
-    anomalies AS IOT_PREDICTIVE_MAINTENANCE.ANALYTICS.DETECTED_ANOMALIES
-      PRIMARY KEY (ANOMALY_ID)
-      COMMENT = 'ML-detected anomalies with severity',
-    work_orders AS IOT_PREDICTIVE_MAINTENANCE.RAW.WORK_ORDERS
-      PRIMARY KEY (WORK_ORDER_ID)
-      COMMENT = 'AI-drafted maintenance work orders',
-    production AS IOT_PREDICTIVE_MAINTENANCE.STAGING.PERFORMANCE_BASELINE
-      COMMENT = 'Per-shift production quality metrics'
-  )
-  RELATIONSHIPS (
-    anomalies_to_health AS anomalies (MACHINE_ID) REFERENCES machine_health,
-    work_orders_to_health AS work_orders (MACHINE_ID) REFERENCES machine_health,
-    production_to_health AS production (MACHINE_ID) REFERENCES machine_health
-  )
-  FACTS (
-    machine_health.health_score_fact AS HEALTH_SCORE COMMENT = 'Health score 0-100',
-    machine_health.anomalies_24h AS TOTAL_ANOMALIES_24H COMMENT = 'Anomaly count last 24h',
-    machine_health.concern_rank_fact AS CONCERN_RANK COMMENT = 'Rank 1 most concerning',
-    anomalies.vibration_reading AS SENSOR_VALUE COMMENT = 'Anomalous vibration value',
-    anomalies.anomaly_confidence AS ANOMALY_SCORE COMMENT = 'ML confidence 0 to 1',
-    work_orders.est_downtime AS ESTIMATED_DOWNTIME_HOURS COMMENT = 'Estimated downtime hours',
-    production.parts_produced_fact AS PARTS_PRODUCED COMMENT = 'Parts produced per shift',
-    production.parts_rejected_fact AS PARTS_REJECTED COMMENT = 'Parts rejected per shift',
-    production.reject_rate AS REJECT_RATE_PCT COMMENT = 'Rejection rate pct',
-    production.cycle_time AS AVG_CYCLE_TIME_SEC COMMENT = 'Average cycle time seconds'
-  )
-  DIMENSIONS (
-    machine_health.machine_id AS machine_health.MACHINE_ID COMMENT = 'Machine ID MCH-0001 to MCH-0050',
-    machine_health.machine_type AS machine_health.MACHINE_TYPE COMMENT = 'Machine category',
-    machine_health.health_status AS machine_health.HEALTH_STATUS COMMENT = 'CRITICAL WARNING FAIR GOOD',
-    anomalies.severity AS anomalies.SEVERITY COMMENT = 'CRITICAL HIGH MEDIUM LOW',
-    anomalies.reading_timestamp AS anomalies.READING_TIMESTAMP COMMENT = 'When anomaly occurred',
-    anomalies.anomaly_status AS anomalies.STATUS COMMENT = 'NEW or TRIAGED',
-    work_orders.wo_status AS work_orders.STATUS COMMENT = 'DRAFT ASSIGNED IN_PROGRESS RESOLVED',
-    work_orders.wo_priority AS work_orders.PRIORITY COMMENT = 'Work order priority',
-    work_orders.technician AS work_orders.ASSIGNED_TECHNICIAN_ID COMMENT = 'Assigned technician',
-    production.shift_date AS production.SHIFT_DATE COMMENT = 'Production shift date',
-    production.perf_status AS production.PERFORMANCE_STATUS COMMENT = 'HEALTHY WARNING DEGRADED'
-  )
-  METRICS (
-    machine_health.avg_health AS AVG(machine_health.HEALTH_SCORE) COMMENT = 'Average health score',
-    anomalies.total_anomalies AS COUNT(anomalies.ANOMALY_ID) COMMENT = 'Total anomalies',
-    work_orders.open_orders AS COUNT(work_orders.WORK_ORDER_ID) COMMENT = 'Total work orders',
-    production.avg_reject AS AVG(production.REJECT_RATE_PCT) COMMENT = 'Average rejection rate'
-  )
-  COMMENT = 'IoT Predictive Maintenance platform';
+-- ============================================================
+-- ANALYTICS.OEE_METRICS
+-- OEE = Availability x Performance x Quality per machine/day/shift
+-- ============================================================
+CREATE OR REPLACE VIEW ANALYTICS.OEE_METRICS AS
+SELECT
+    pq.MACHINE_ID, m.MACHINE_NAME, m.MACHINE_TYPE, m.LINE, m.CRITICALITY,
+    pq.PRODUCTION_DATE, pq.SHIFT,
+    ROUND(CASE WHEN pq.PLANNED_RUNTIME_HRS > 0 THEN pq.ACTUAL_RUNTIME_HRS / pq.PLANNED_RUNTIME_HRS * 100 ELSE 0 END, 2) AS AVAILABILITY_PCT,
+    ROUND(CASE WHEN pq.ACTUAL_RUNTIME_HRS > 0 AND pq.IDEAL_CYCLE_TIME_SEC > 0
+        THEN (pq.ACTUAL_UNITS * pq.IDEAL_CYCLE_TIME_SEC) / (pq.ACTUAL_RUNTIME_HRS * 3600) * 100 ELSE 0 END, 2) AS PERFORMANCE_PCT,
+    ROUND(CASE WHEN pq.ACTUAL_UNITS > 0 THEN pq.GOOD_UNITS::FLOAT / pq.ACTUAL_UNITS * 100 ELSE 0 END, 2) AS QUALITY_PCT,
+    ROUND(
+        (CASE WHEN pq.PLANNED_RUNTIME_HRS > 0 THEN pq.ACTUAL_RUNTIME_HRS / pq.PLANNED_RUNTIME_HRS ELSE 0 END) *
+        (CASE WHEN pq.ACTUAL_RUNTIME_HRS > 0 AND pq.IDEAL_CYCLE_TIME_SEC > 0
+              THEN (pq.ACTUAL_UNITS * pq.IDEAL_CYCLE_TIME_SEC) / (pq.ACTUAL_RUNTIME_HRS * 3600) ELSE 0 END) *
+        (CASE WHEN pq.ACTUAL_UNITS > 0 THEN pq.GOOD_UNITS::FLOAT / pq.ACTUAL_UNITS ELSE 0 END) * 100, 2) AS OEE_PCT,
+    pq.ACTUAL_UNITS, pq.GOOD_UNITS, pq.REJECTED_UNITS,
+    pq.DOWNTIME_HRS, pq.CYCLE_TIME_SEC, pq.IDEAL_CYCLE_TIME_SEC, pq.PRODUCTION_STATUS
+FROM RAW.PRODUCTION_QUALITY pq
+JOIN RAW.MACHINES m ON pq.MACHINE_ID = m.MACHINE_ID;
+
+-- ============================================================
+-- ANALYTICS.PRODUCTION_IMPACT
+-- Links incidents to OEE exposure and production risk
+-- ============================================================
+CREATE OR REPLACE VIEW ANALYTICS.PRODUCTION_IMPACT AS
+SELECT
+    i.INCIDENT_ID, i.MACHINE_ID, i.MACHINE_NAME, i.SEVERITY, i.PRIORITY_SCORE,
+    i.SUSPECTED_FAILURE_MODE, i.RUL_DAYS,
+    oee.CURRENT_OEE, oee.CURRENT_AVAILABILITY, oee.CURRENT_QUALITY,
+    oee.OEE_7D_AVG,
+    ROUND(oee.CURRENT_OEE - oee.OEE_7D_AVG, 2) AS OEE_TREND,
+    ROUND(oee.DAILY_GOOD_UNITS * COALESCE(i.RUL_DAYS, 7), 0) AS UNITS_AT_RISK_IF_FAILURE,
+    ROUND(wo.ESTIMATED_DOWNTIME_HRS * oee.UNITS_PER_HOUR, 0) AS UNITS_LOST_DURING_REPAIR,
+    wo.ESTIMATED_DOWNTIME_HRS AS DOWNTIME_HRS_AT_RISK,
+    oee.CURRENT_REJECT_RATE,
+    ROUND(oee.REJECT_TREND, 2) AS REJECT_RATE_TREND
+FROM ANALYTICS.INCIDENTS i
+LEFT JOIN (
+    SELECT MACHINE_ID,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN OEE_PCT END), 2) AS CURRENT_OEE,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN AVAILABILITY_PCT END), 2) AS CURRENT_AVAILABILITY,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN QUALITY_PCT END), 2) AS CURRENT_QUALITY,
+        ROUND(AVG(OEE_PCT), 2) AS OEE_7D_AVG,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN GOOD_UNITS END), 0) AS DAILY_GOOD_UNITS,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN GOOD_UNITS END) / 8.0, 1) AS UNITS_PER_HOUR,
+        ROUND(AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN REJECTED_UNITS::FLOAT/NULLIF(ACTUAL_UNITS,0)*100 END), 2) AS CURRENT_REJECT_RATE,
+        AVG(CASE WHEN PRODUCTION_DATE = (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY) THEN REJECTED_UNITS::FLOAT/NULLIF(ACTUAL_UNITS,0)*100 END) -
+        AVG(CASE WHEN PRODUCTION_DATE BETWEEN DATEADD('day',-7,(SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY))
+                                        AND DATEADD('day',-1,(SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY)) THEN REJECTED_UNITS::FLOAT/NULLIF(ACTUAL_UNITS,0)*100 END) AS REJECT_TREND
+    FROM ANALYTICS.OEE_METRICS
+    WHERE PRODUCTION_DATE >= DATEADD('day', -7, (SELECT MAX(PRODUCTION_DATE) FROM RAW.PRODUCTION_QUALITY))
+    GROUP BY MACHINE_ID
+) oee ON i.MACHINE_ID = oee.MACHINE_ID
+LEFT JOIN RAW.WORK_ORDERS wo ON i.INCIDENT_ID = wo.INCIDENT_ID AND wo.STATUS != 'REJECTED';
+
+-- ============================================================
+-- APP.COMMAND_CENTER_VIEW
+-- Joins incidents, machines, maintenance context, work orders
+-- ============================================================
+CREATE OR REPLACE VIEW APP.COMMAND_CENTER_VIEW AS
+SELECT
+    i.INCIDENT_ID, i.MACHINE_ID, i.MACHINE_NAME, i.MACHINE_TYPE, i.CRITICALITY,
+    m.LINE, m.STATION, m.LOCATION,
+    i.SUSPECTED_FAILURE_MODE, i.ALL_PREDICTED_MODES,
+    i.SEVERITY AS INCIDENT_SEVERITY, i.PRIORITY_SCORE, i.STATUS AS INCIDENT_STATUS,
+    i.INCIDENT_START, i.LATEST_ACTIVITY, i.INCIDENT_AGE_HOURS,
+    i.RELATED_ANOMALY_COUNT, i.AFFECTED_SIGNALS,
+    i.HEALTH_SCORE, i.HEALTH_STATUS, i.RISK_HORIZON, i.RUL_DAYS, i.CONFIDENCE_LEVEL,
+    i.EVIDENCE_NARRATIVE, i.PRODUCTION_IMPACT, i.REJECT_RATE_PCT,
+    i.PARTS_AVAILABLE, i.MIN_LEAD_TIME_DAYS,
+    mc.LAST_FAILURE_MODE, mc.LAST_ROOT_CAUSE, mc.DAYS_SINCE_LAST_MAINT,
+    mc.FAILURE_COUNT, mc.TOTAL_MAINT_COST,
+    mc.LATEST_OBS_TYPE, mc.LATEST_OBS_DETAIL, mc.LATEST_OBS_SEVERITY,
+    wo.WORK_ORDER_ID, wo.STATUS AS WORK_ORDER_STATUS,
+    wo.PROBLEM_DESCRIPTION AS WO_PROBLEM, wo.RECOMMENDED_ACTIONS AS WO_ACTIONS,
+    wo.ESTIMATED_REPAIR_HRS, wo.ASSIGNED_TECHNICIAN,
+    i.CREATED_AT AS INCIDENT_CREATED_AT
+FROM ANALYTICS.INCIDENTS i
+JOIN RAW.MACHINES m ON i.MACHINE_ID = m.MACHINE_ID
+LEFT JOIN ANALYTICS.MAINTENANCE_CONTEXT mc ON i.MACHINE_ID = mc.MACHINE_ID
+LEFT JOIN RAW.WORK_ORDERS wo ON i.MACHINE_ID = wo.MACHINE_ID AND wo.STATUS NOT IN ('RESOLVED','REJECTED');
+
+-- ============================================================
+-- APP.FLEET_HEALTH_VIEW
+-- Fleet health with incident overlay
+-- ============================================================
+CREATE OR REPLACE VIEW APP.FLEET_HEALTH_VIEW AS
+SELECT
+    cmh.MACHINE_ID, cmh.MACHINE_NAME, cmh.MACHINE_TYPE, cmh.LINE, cmh.CRITICALITY,
+    cmh.CURRENT_STATE, cmh.HEALTH_SCORE, cmh.HEALTH_STATUS, cmh.CONCERN_RANK,
+    cmh.WORST_SIGNAL_SCORE, cmh.WORST_SIGNAL_TYPE,
+    i.INCIDENT_ID, i.SEVERITY AS INCIDENT_SEVERITY, i.PRIORITY_SCORE, i.RUL_DAYS,
+    i.SUSPECTED_FAILURE_MODE,
+    cmh.COMPUTED_AT
+FROM STAGING.CROSS_MACHINE_HEALTH cmh
+LEFT JOIN ANALYTICS.INCIDENTS i ON cmh.MACHINE_ID = i.MACHINE_ID;
